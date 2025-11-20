@@ -1,0 +1,3 @@
+1. Never risk more than 1% of total equity on any single trade.
+2. If volatility spikes above 20% and sentiment is neutral, exit positions to lock profit.
+3. A BUY signal is mandated if the mispricing indicator is > 0.1 AND momentum is strong and positive.

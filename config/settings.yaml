@@ -1,0 +1,14 @@
+ollama:
+  embedding_model: "nomic-embed-text:latest"
+  llm_model: "deepseek-r1:7b"
+
+rag:
+  chunk_size: 500
+  chunk_overlap: 50
+  top_k: 5
+
+backtester:
+  capital: 10000
+
+logging:
+  level: INFO
