@@ -1,9 +1,9 @@
-# Local Financial AI Agent (FAISS + nomic-embed-text) — with Backtesting & Streamlit
+# Local Financial AI Agent (Local Ollama LLM + nomic-embed-text) — with Backtesting & Streamlit
 
 This repository now includes:
 - VectorBT-based backtester (vectorized, fast)
 - Backtrader-based strategy example (event-driven)
-- Streamlit dashboard to fetch data, run SMA backtests, and call the Decision Agent
+- Streamlit dashboard to fetch yahoo ticker data and call the Decision Agent
 
 ## Quickstart
 
@@ -28,7 +28,8 @@ This repository now includes:
 
 5. Run the dashboard:
    ```bash
-   streamlit run ui/streamlit_app.py
+   streamlit run ui/streamlit_app.py --server.port 8888
+   streamlit run ui/trading_signals_dashboard.py --server.port=8888
    ```
 
 6. Or run main:
