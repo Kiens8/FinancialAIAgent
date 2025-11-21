@@ -1,10 +1,13 @@
 import json
 import os
 import yfinance as yf
+import pandas as pd  # Added pandas import for data handling
+import numpy as np
 from agents.strategy_research_agent import StrategyResearchAgent
 from agents.decision_agent import DecisionAgent
 from signals.signal_engine import generate_signals
 from utils.file import load_text
+
 CONFIG_DIR = "config"
 FAV_FILE = os.path.join(CONFIG_DIR, "favorites.json")
 DEFAULT_FAVS = ["AAPL", "MSFT", "TSLA"]
@@ -31,25 +34,56 @@ def load_favorites():
 
 
 # -----------------------------
-# Fetch OHLCV data — IMPORTANT:
-# Must include High, Low, Close to match signal_engine
+# Fetch OHLCV data
+# Synced with trading_signals_dashboard.py
 # -----------------------------
-def fetch_price_data(ticker, days=90):
+def fetch_price_data(ticker, days=180):  # Changed default to 180 to match Dashboard
     try:
+        # Removed auto_adjust=False to match Dashboard's default behavior
         df = yf.download(
             ticker,
             period=f"{days}d",
             interval="1d",
-            progress=False,
-            auto_adjust=False
+            progress=False
         )
 
-        if df.empty:
+        if df is None or df.empty:
             print(f"{ticker}: No yfinance data.")
             return None
 
-        # Must keep High, Low, Close for ATR
-        df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+        # ---------------------------------------------------------
+        # Fix MultiIndex columns (yfinance update compatibility)
+        # This matches the logic in the Dashboard
+        # ---------------------------------------------------------
+        if isinstance(df.columns, pd.MultiIndex):
+            new_cols = []
+            for col_tuple in df.columns:
+                if isinstance(col_tuple, tuple):
+                    # Keep the standard column name (Open, Close, etc.)
+                    if col_tuple[1] in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
+                        new_cols.append(col_tuple[1])
+                    else:
+                        new_cols.append(col_tuple[0])
+                else:
+                    new_cols.append(col_tuple)
+            df.columns = new_cols
+
+        # Ensure numeric
+        df = df.apply(pd.to_numeric, errors="coerce")
+
+        # ---------------------------------------------------------
+        # Loose Cleaning (Matches Dashboard)
+        # Only drop if 'Close' is missing.
+        # Previous strict dropna() was causing 0.00 Confidence if Volume was missing.
+        # ---------------------------------------------------------
+        if "Close" in df.columns:
+            df = df.dropna(subset=["Close"])
+        
+        # If Close still missing or empty after drop, return None
+        if df.empty or "Close" not in df.columns:
+             print(f"{ticker}: Data empty after cleaning.")
+             return None
+
         return df
 
     except Exception as e:
@@ -57,9 +91,6 @@ def fetch_price_data(ticker, days=90):
         return None
 
 
-# -----------------------------
-# Ask local LLM to validate indicator signal
-# -----------------------------
 # -----------------------------
 # Ask local LLM to validate indicator signal
 # -----------------------------
@@ -161,6 +192,8 @@ if __name__ == '__main__':
 -----------------------------------------
 Ticker: {ticker}
 Indicator Signal : {indicator_signal}
+Indicator Confidence : {confidence}
+Indicator Details  : {details}
 Signal LLM       : {llm_signal}
 Conclusion       : {conclusion}
 -----------------------------------------
