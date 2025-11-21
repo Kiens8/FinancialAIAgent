@@ -84,7 +84,6 @@ def fetch_price_data(symbol, days=180):
                     new_cols.append(col_tuple)
             df.columns = new_cols
 
-        # Ensure "Close" column exists
         if "Close" not in df.columns:
             if "Adj Close" in df.columns:
                 df["Close"] = df["Adj Close"]
@@ -100,37 +99,76 @@ def fetch_price_data(symbol, days=180):
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
 
 
+# -----------------------------------------
+# ✅ Updated call_decision_agent_local
+# -----------------------------------------
 def call_decision_agent_local(symbol, df, signals):
     """
-    Call local DecisionAgent.decide() with market_state.
-    Returns a dict (parsed JSON).
+    Call local LLM (DeepSeek / Ollama) and extract clean text only.
+    No JSON shown to user.
     """
+    import json
+    import re
+
     try:
         recent_prices = df["Close"].tail(30).tolist()
-        indicators_payload = {
-            "rsi": signals.get("details", {}).get("rsi_14d"),
-            "macd": signals.get("details", {}).get("ma_diff"),
-            "signal": signals.get("signal", "HOLD"),
-        }
 
-        market_state = {
-            "ticker": symbol,
-            "recent_prices": recent_prices,
-            "indicators": indicators_payload
-        }
+        signal_label = signals.get("signal", "HOLD")
+        confidence = signals.get("confidence", 0.0)
+        details = signals.get("details", {})
 
-        raw_response = agent_instance.decide(market_state)
+        prompt = f"""
+You are a trading assistant.
 
-        # Parse JSON safely
-        try:
-            result = json.loads(raw_response)
-        except Exception:
-            if isinstance(raw_response, dict):
-                result = raw_response
-            else:
-                result = {"raw_response": raw_response}
+System generated signal:
+- Signal: {signal_label}
+- Confidence: {confidence:.2f}
 
-        return result
+Indicator details:
+{json.dumps(details, indent=2)}
+
+Task:
+1. Check if the signal appears correct based on these indicators.
+2. If incorrect, give a short explanation (1–2 sentences max).
+3. Your entire response must be plain text only. No JSON. No code. No thinking tags.
+"""
+
+        raw_stream = agent_instance.llm.ask(prompt)
+
+        # -------------------------------------------
+        # 🧹 CLEAN STREAMING OLLAMA OUTPUT
+        # -------------------------------------------
+
+        # If output is dict or non-string, convert to string
+        if isinstance(raw_stream, dict):
+            raw_stream = json.dumps(raw_stream)
+
+        # Gather all "response" fields from streaming JSON lines
+        clean_text_list = []
+
+        for line in raw_stream.splitlines():
+            try:
+                obj = json.loads(line)
+                if "response" in obj:
+                    clean_text_list.append(obj["response"])
+            except:
+                # Not JSON — append plain text
+                clean_text_list.append(line)
+
+        # Join all fragments
+        clean_text = "".join(clean_text_list)
+
+        # Remove <think> ... </think> if any
+        clean_text = re.sub(r"<think>.*?</think>", "", clean_text, flags=re.DOTALL)
+
+        # Trim whitespace
+        clean_text = clean_text.strip()
+
+        # Fallback
+        if not clean_text:
+            clean_text = "No readable response from the model."
+
+        return {"text": clean_text}
 
     except Exception as e:
         return {"error": str(e), "raw": repr(e)}
@@ -208,7 +246,6 @@ def main():
             st.markdown("**Signal details**")
             st.json(sig.get("details", {}))
 
-            # Local Decision Agent button
             if st.button("Ask Decision Agent for explanation"):
                 with st.spinner("Analyzing with local decision agent..."):
                     agent_resp = call_decision_agent_local(selected, df, sig)
@@ -216,8 +253,8 @@ def main():
                 if "error" in agent_resp:
                     st.error(agent_resp)
                 else:
-                    st.success(agent_resp.get("decision", agent_resp.get("action", "No decision")))
-                    st.json(agent_resp)
+                    st.markdown("### Decision Agent Explanation")
+                    st.write(agent_resp.get("text", "No response"))
 
         except Exception as e:
             st.error("An unexpected error occurred while rendering the view.")
