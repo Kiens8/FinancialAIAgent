@@ -92,8 +92,21 @@ def safe_download(tickers, period="1y", interval="1d"):
     if not data:
         return pd.DataFrame()
     
-    # Return DataFrame where columns = tickers
-    return pd.DataFrame(data)
+    # Create Batch DataFrame
+    df_combined = pd.DataFrame(data)
+    
+    # ---------------------------------------------------------
+    # 🔥 FIX FOR BATCH MODE (Stocks + Crypto)
+    # ---------------------------------------------------------
+    # When mixing Crypto (7 days) and Stocks (5 days), Stocks get NaNs on weekends.
+    # This breaks Rolling MAs and RSI calculations.
+    # We forward fill (ffill) so Saturday/Sunday prices = Friday's close.
+    df_combined.ffill(inplace=True)
+    
+    # Drop initial NaNs (e.g., if one stock listed later than others)
+    df_combined.dropna(how='all', inplace=True)
+    
+    return df_combined
 
 # ------------------------------
 # Indicator Logic (Replicated from signal_engine.py)
@@ -120,6 +133,7 @@ def calculate_indicators(close_series):
     delta = close_series.diff()
     up = delta.clip(lower=0)
     down = -1 * delta.clip(upper=0)
+    
     # signal_engine uses rolling mean for RSI, not Wilder's
     ma_up = up.rolling(window=RSI_W, min_periods=RSI_W).mean()
     ma_down = down.rolling(window=RSI_W, min_periods=RSI_W).mean()
@@ -143,6 +157,7 @@ def run_strategy(close_series, fees=0.001):
     exits = (short_ma < long_ma) & (momentum < 0) & (rsi > 30)
     
     # Run Backtest using VectorBT
+    # init_cash=10000 is arbitrary for percentage calculations
     pf = vbt.Portfolio.from_signals(
         close_series, 
         entries, 
@@ -152,6 +167,19 @@ def run_strategy(close_series, fees=0.001):
         init_cash=10000
     )
     return pf
+
+# ------------------------------
+# Helper: Clean Stats Display
+# ------------------------------
+def display_clean_stats(pf):
+    """
+    Fetches stats, replaces NaNs with '-' or 0, and displays as a nice table.
+    """
+    stats = pf.stats()
+    df_stats = stats.to_frame(name="Value")
+    df_stats = df_stats.astype(object) # Convert to object to hold strings
+    df_stats.fillna("-", inplace=True) # Replace NaNs
+    st.table(df_stats)
 
 # ------------------------------
 # UI Sidebar
@@ -208,7 +236,6 @@ if st.button('Run Backtest'):
     try:
         # Determine if we have one column (Series) or multiple (DataFrame)
         if mode == "Single Ticker":
-             # safe_download returns a DF with ticker columns, get the single column
             if ticker in prices_df.columns:
                 close_data = prices_df[ticker]
             else:
@@ -222,38 +249,41 @@ if st.button('Run Backtest'):
         if mode == "Single Ticker":
             st.subheader(f"Performance: {ticker}")
             
+            total_return = pf.total_return()
+            max_drawdown = pf.max_drawdown()
+            win_rate = pf.trades.win_rate()
+            trade_count = pf.trades.count()
+            
             col1, col2, col3 = st.columns(3)
-            
-            # FIX: Use pf.trades.win_rate() instead of pf.win_rate()
-            win_rate_val = pf.trades.win_rate()
-            
-            # Handle case where no trades happen (NaN)
-            if pd.isna(win_rate_val):
-                win_rate_str = "N/A"
-            else:
-                win_rate_str = f"{win_rate_val:.2%}"
+            col1.metric("Total Return", f"{total_return:.2%}")
+            col3.metric("Max Drawdown", f"{max_drawdown:.2%}")
 
-            col1.metric("Total Return", f"{pf.total_return():.2%}")
-            col2.metric("Win Rate", win_rate_str)
-            col3.metric("Max Drawdown", f"{pf.max_drawdown():.2%}")
+            if trade_count == 0:
+                col2.metric("Win Rate", "N/A (0 Trades)")
+            else:
+                col2.metric("Win Rate", f"{win_rate:.2%}")
             
             st.subheader("Equity Curve")
             st.plotly_chart(pf.plot(title=f"Equity - {ticker}"), use_container_width=True)
             
-            with st.expander("View Trade Log"):
-                st.dataframe(pf.orders.records_readable)
-                
+            with st.expander("View Trade Log", expanded=True):
+                if trade_count > 0:
+                    st.dataframe(pf.orders.records_readable)
+                else:
+                    st.info("No trades were executed.")
+
             with st.expander("View Statistics"):
-                st.text(pf.stats())
+                display_clean_stats(pf)
 
         else:
             # Batch Results
             st.subheader("Batch Performance Comparison")
             
             # Gather metrics
-            total_ret = pf.total_return()
-            sharpe = pf.sharpe_ratio()
-            max_dd = pf.max_drawdown()
+            # Replace Infinity with 0.0 or NaN to prevent Arrow Serialization Error
+            total_ret = pf.total_return().replace([np.inf, -np.inf], 0.0)
+            sharpe = pf.sharpe_ratio().replace([np.inf, -np.inf], 0.0)
+            max_dd = pf.max_drawdown().replace([np.inf, -np.inf], 0.0)
             
             metrics_df = pd.DataFrame({
                 "Total Return": total_ret,
@@ -261,14 +291,23 @@ if st.button('Run Backtest'):
                 "Max Drawdown": max_dd
             })
             
+            # Sort by Total Return
+            metrics_df = metrics_df.sort_values("Total Return", ascending=False)
+            
             # Formatting
-            st.dataframe(metrics_df.style.format("{:.2%}", subset=["Total Return", "Max Drawdown"]).format("{:.2f}", subset=["Sharpe Ratio"]).background_gradient(cmap="RdYlGn", subset=["Total Return"]))
+            st.dataframe(
+                metrics_df.style
+                .format("{:.2%}", subset=["Total Return", "Max Drawdown"])
+                .format("{:.2f}", subset=["Sharpe Ratio"])
+                .background_gradient(cmap="RdYlGn", subset=["Total Return"])
+            )
             
             st.subheader("Cumulative Returns Comparison")
             st.line_chart(pf.value())
             
-            best_ticker = total_ret.idxmax()
-            st.success(f"🏆 Best Performer: **{best_ticker}** with {total_ret.max():.2%} return")
+            best_ticker = metrics_df.index[0]
+            best_ret = metrics_df.iloc[0]["Total Return"]
+            st.success(f"🏆 Best Performer: **{best_ticker}** with {best_ret:.2%} return")
 
     except Exception as e:
         st.error(f"An error occurred during backtesting: {str(e)}")
